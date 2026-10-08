@@ -43,6 +43,78 @@ export const Config: Schema<Config> = Schema.object({
     .description('📚 Markdown 示例库：预置的 Markdown 模板数组，可通过 --example 索引调用'),
 })
 
+function asRecord(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' ? value as Record<string, any> : {}
+}
+
+function readHeader(headers: unknown, name: string): unknown {
+  const source = asRecord(headers)
+  if (typeof source.get === 'function') return source.get(name)
+  return source[name] || source[name.toLowerCase()]
+}
+
+function stringifyForLog(value: unknown): string {
+  try {
+    const result = JSON.stringify(value, null, 2)
+    return result === undefined ? String(value) : result
+  } catch (error) {
+    return `[无法序列化: ${error instanceof Error ? error.message : String(error)}]`
+  }
+}
+
+function getQqErrorDetails(error: unknown, payload: unknown) {
+  const source = asRecord(error)
+  const response = asRecord(source.response)
+  const responseData = response.data
+  const data = asRecord(responseData)
+  const traceId = data.trace_id || readHeader(response.headers, 'x-tps-trace-id')
+
+  return {
+    name: source.name || (error instanceof Error ? error.name : typeof error),
+    message: source.message || String(error),
+    code: source.code,
+    stack: source.stack || (error instanceof Error ? error.stack : undefined),
+    requestPayload: payload,
+    response: {
+      status: response.status,
+      statusText: response.statusText,
+      url: response.url,
+      code: data.code ?? data.err_code,
+      message: data.message,
+      traceId,
+      data: responseData,
+    },
+  }
+}
+
+function formatQqErrorForLog(error: unknown, payload: unknown): string {
+  const details = getQqErrorDetails(error, payload)
+  return [
+    '💥 ========== QQ Markdown 发送失败详情 ==========',
+    `异常类型: ${details.name}`,
+    `异常消息: ${details.message}`,
+    `异常代码: ${details.code ?? '(无)'}`,
+    `HTTP 状态: ${details.response.status ?? '(无)'} ${details.response.statusText ?? ''}`.trimEnd(),
+    `请求 URL: ${details.response.url ?? '(无)'}`,
+    `QQ 业务码: ${details.response.code ?? '(无)'}`,
+    `QQ 返回消息: ${details.response.message ?? '(无)'}`,
+    `QQ trace_id: ${details.response.traceId ?? '(无)'}`,
+    `请求 payload:\n${stringifyForLog(details.requestPayload)}`,
+    `响应原始 JSON:\n${stringifyForLog(details.response.data)}`,
+    `Stack trace:\n${details.stack || '(无)'}`,
+    '💥 ==============================================',
+  ].join('\n')
+}
+
+function formatQqErrorForReply(error: unknown): string {
+  const details = getQqErrorDetails(error, undefined)
+  const parts = [details.message]
+  if (details.response.code !== undefined) parts.push(`QQ code: ${details.response.code}`)
+  if (details.response.message) parts.push(`QQ message: ${details.response.message}`)
+  if (details.response.traceId) parts.push(`trace_id: ${details.response.traceId}`)
+  return parts.join('；')
+}
+
 /**
  * 📤 核心发送函数：将 Markdown 内容发送到 QQ 平台
  * @param session - 当前会话上下文
@@ -67,23 +139,25 @@ async function sendMarkdown(session, content: string, config: Config) {
     session.app.logger('md-tryer').info('✅ =======================================')
   }
 
+  const payload = {
+    msg_id: session.messageId,
+    msg_type: 2, // 2 代表 Markdown 消息类型
+    markdown: {
+      content,
+    },
+  }
+
   try {
     // 📨 调用 QQ Bot API 发送原生 Markdown 消息
-    await session.bot.internal.sendMessage(session.channelId, {
-      msg_id: session.messageId,
-      msg_type: 2, // 2 代表 Markdown 消息类型
-      markdown: {
-        content,
-      },
-    })
+    await session.bot.internal.sendMessage(session.channelId, payload)
     
     if (config.verboseConsoleInfo) {
       session.app.logger('md-tryer').info('✨ Markdown 发送成功')
     }
-  } catch (e) {
-    // ❌ 异常处理：捕获发送失败并记录错误
-    session.app.logger('echo-md').error('💥 发送失败:', e)
-    const errorMsg = `❌ 发送失败，请确认是否已开通原生 MD 权限。错误信息: ${e.message}`
+  } catch (error) {
+    // ❌ 预格式化完整错误，确保控制台和持久化日志不会只剩 Bad Request
+    session.app.logger('md-tryer').error(formatQqErrorForLog(error, payload))
+    const errorMsg = `❌ Markdown 发送失败。${formatQqErrorForReply(error)}`
     return config.enableQuote ? h.quote(session.messageId) + errorMsg : errorMsg
   }
 }

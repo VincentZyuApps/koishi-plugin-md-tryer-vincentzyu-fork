@@ -1,5 +1,7 @@
 * text eol=lf
 
+*.md text eol=lf linguist-detectable -linguist-documentation
+
 *.png -text
 *.jpg -text
 *.ico -text
